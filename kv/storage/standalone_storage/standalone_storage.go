@@ -14,7 +14,7 @@ import (
 type StandAloneStorage struct {
   // Your Data Here (1).
   engine    *engine_util.Engines
-  conf    *config.Config
+//   conf    *config.Config
   Txn       *badger.Txn
 }
 
@@ -27,7 +27,7 @@ func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
   engines := engine_util.NewEngines(kvDB, raftDB, kvPath, raftPath)
   return &StandAloneStorage {
     engine:  engines,
-    conf:       conf,
+    // conf:       conf,
   }
 }
 

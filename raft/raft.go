@@ -16,6 +16,8 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
+	"time"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -142,7 +144,7 @@ type Raft struct {
 	// Number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
 	electionElapsed int
-
+	electionRandomTimeout int
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in section 3.10 of Raft phd thesis.
 	// (https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf)
@@ -160,12 +162,36 @@ type Raft struct {
 }
 
 // newRaft return a raft peer with the given config
+// 这里接收到了config发来的参数
 func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+	ID := c.ID
+	etT := c.ElectionTick
+	hbT := c.HeartbeatTick
+	// sg := c.Storage
+	// Msg := make([]pb.Message,size)
+	vote := make(map[uint64]bool)
+	Prs := make(map[uint64]*Progress)
+	for _,i := range c.peers{
+		vote[i] = false
+		Prs[i] = new(Progress)
+	}
+
+	return &Raft {
+		id : ID,
+		Vote: None,
+		heartbeatTimeout: hbT,
+		electionRandomTimeout: etT, 
+		electionTimeout: etT,
+		electionElapsed: 0,
+		heartbeatElapsed: 0,
+		State: StateFollower,
+		votes: vote,
+		Term: None,
+	}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -178,39 +204,259 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		Term: r.Term,
+		To: to,
+		From: r.id,
+	})
 }
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	nanotime := int64(time.Now().UnixNano())
+	rand.Seed(nanotime)
+	switch r.State{
+	case StateFollower: {
+		r.electionElapsed = r.electionElapsed + 1
+		if r.electionElapsed >= r.electionRandomTimeout {
+			r.electionElapsed = 0
+			r.electionRandomTimeout = rand.Intn(r.electionTimeout)+r.electionTimeout
+			r.Step(pb.Message{
+				MsgType: pb.MessageType_MsgHup,
+			})
+		}
+	}
+	case StateCandidate: {
+		r.electionElapsed = r.electionElapsed + 1
+		if r.electionElapsed >= r.electionRandomTimeout {
+			r.electionElapsed = 0
+			r.electionRandomTimeout = rand.Intn(r.electionTimeout)+r.electionTimeout
+			r.becomeCandidate()
+			r.Step(pb.Message{
+				MsgType: pb.MessageType_MsgHup,
+			})
+		}
+	}
+	case StateLeader: {
+		r.heartbeatElapsed = r.heartbeatElapsed + 1
+		if r.heartbeatElapsed >= r.heartbeatTimeout {
+			r.heartbeatElapsed = 0
+			r.Step(pb.Message{
+				MsgType: pb.MessageType_MsgBeat,
+			})
+		}
+	}
 }
+
+}
+
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	r.State = StateFollower
+	r.Term = term
+	r.Lead = lead
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.State = StateCandidate
+	r.Term = r.Term + 1
+	r.electionElapsed = 0
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	r.State = StateLeader
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
 }
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	switch r.State {
-	case StateFollower:
-	case StateCandidate:
-	case StateLeader:
+
+switch r.State {
+	case StateFollower:{
+		switch m.MsgType{
+		case pb.MessageType_MsgAppend:{
+			if m.Term > r.Term{
+				r.Term = m.Term
+			}
+			r.handleAppendEntries(m)
+		}
+
+
+
+			case pb.MessageType_MsgHup:{  //竞选超时产生候选人
+				r.becomeCandidate()
+				r.Step(pb.Message{                                 //身份转换后需要重新进入step中寻找对应的身份
+					MsgType: pb.MessageType_MsgHup,
+				})
+			}
+
+			case pb.MessageType_MsgHeartbeat:{   //接收到心跳
+				if m.Term >= r.Term{
+					r.becomeFollower(m.Term,m.From)
+					r.Vote = m.From
+				}
+				r.msgs = append(r.msgs, pb.Message{
+					MsgType: pb.MessageType_MsgHeartbeatResponse,
+					To: m.From,
+					From: r.id,
+					Term: r.Term,
+				})
+			}
+
+			case pb.MessageType_MsgRequestVote:{  //回应并且投票
+				if m.Term > r.Term {       //如果任期大的来我们更新任期为较大的那个
+					r.Term = m.Term
+					r.Vote = None
+				}
+				R := true
+				if r.Vote == None || r.Vote == m.From{
+					r.Vote = m.From
+					R = false
+				}
+					r.msgs = append(r.msgs, pb.Message{
+						MsgType: pb.MessageType_MsgRequestVoteResponse,
+						To: m.From,
+						From: r.id,
+						Term: r.Term,
+						Reject: R,
+					})
+			}	
+		}
+	
 	}
-	return nil
+case StateCandidate:{
+	switch m.MsgType {
+		case pb.MessageType_MsgAppend:{
+			if m.Term >= r.Term{
+				r.Term = m.Term
+				r.becomeFollower(m.Term,m.From)
+			}
+			r.handleAppendEntries(m)
+		}
+		case pb.MessageType_MsgHup:{                //候选人开始竞选
+			if r.id == r.Vote{                                //如果候选人平票则通过增加任期来进行下一次选举
+				r.Term++
+			}
+			r.votes[r.id] = true                          //对自己投票
+			r.Vote = r.id                                   //对下次是否平票做判断
+			for i := range r.votes{                     //向除了自己的结点号发起投票
+				if i != r.id{	
+					r.msgs = append(r.msgs, pb.Message{
+						MsgType: pb.MessageType_MsgRequestVote,
+						To: i,
+						From: r.id,
+						Term: r.Term,
+					})
+				}
+		    }
+			r.Step(pb.Message{
+				To: r.id,
+				From: r.id,
+				MsgType: pb.MessageType_MsgRequestVoteResponse,
+				Term: r.Term,
+				Reject: false,
+			})                                     
+		}
+    case pb.MessageType_MsgHeartbeat:{
+		if m.Term > r.Term{
+			r.becomeFollower(m.Term,m.From)
+			r.Term = m.Term
+		}
+	}
+
+
+	case pb.MessageType_MsgRequestVoteResponse:{        //对投票统计
+		sum := 0
+		plen := len(r.votes)
+		if !m.Reject {
+			r.votes[m.From] = true
+		}
+
+		for i := range r.votes{
+			if r.votes[i] {
+				sum++
+			}
+		}
+		if plen%2 == 1{
+			if sum > plen/2 {
+				r.electionElapsed = 0
+				r.becomeLeader()
+				r.Step(pb.Message{
+					MsgType: pb.MessageType_MsgBeat,
+				})	
+			}
+		}else{
+			if sum >= plen/2 {
+				r.electionElapsed = 0
+				r.becomeLeader()
+				r.Step(pb.Message{
+					MsgType: pb.MessageType_MsgBeat,
+				})
+			}
+		}
+	}
+
+	
+
+		case pb.MessageType_MsgRequestVote:{      //收到投票请求
+			R := true
+			if m.Term > r.Term{                   //如果另一个候选者的term大于该候选者的term
+				R = false
+				r.becomeFollower(m.Term,m.From)
+				r.Vote = m.From
+			}
+			r.msgs = append(r.msgs, pb.Message{
+				MsgType: pb.MessageType_MsgRequestVoteResponse,
+				To: m.From,
+				From: r.id,
+				Term: m.Term,
+				Reject: R,
+			})
+		}
+	}
+
+}
+	case StateLeader:{
+		switch m.MsgType {
+			case pb.MessageType_MsgAppend:{
+				if m.Term > r.Term{
+					r.Term = m.Term
+					r.becomeFollower(m.Term,m.From)
+					r.handleAppendEntries(m)
+				}
+			}
+			
+			case pb.MessageType_MsgBeat:{          //发送已经定义的心跳包
+				for i := range r.votes {
+					if i != r.id{
+						r.sendHeartbeat(i)
+					}
+				}
+			}
+		case pb.MessageType_MsgPropose:{
+			for i := range r.votes{
+				if i != r.id{
+					r.sendAppend(i)
+				}
+			}
+		}
+			
+		}
+	}
+}
+return nil
 }
 
 // handleAppendEntries handle AppendEntries RPC request

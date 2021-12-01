@@ -52,9 +52,12 @@ type MessageType int32
 const (
 	// 'MessageType_MsgHup' is a local message used for election. If an election timeout happened,
 	// the node should pass 'MessageType_MsgHup' to its Step method and start a new election.
+	// 节点应将“MessageType_MsgHup”传递给其 Step 方法并开始新的选举。
 	MessageType_MsgHup MessageType = 0
 	// 'MessageType_MsgBeat' is a local message that signals the leader to send a heartbeat
 	// of the 'MessageType_MsgHeartbeat' type to its followers.
+	//MessageType_MsgBeat' 是一个本地消息，指示领导者发送心跳
+    // 'MessageType_MsgHeartbeat' 类型给它的追随者。
 	MessageType_MsgBeat MessageType = 1
 	// 'MessageType_MsgPropose' is a local message that proposes to append data to the leader's log entries.
 	MessageType_MsgPropose MessageType = 2
